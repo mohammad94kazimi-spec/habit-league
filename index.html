@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>چالش عادت‌ها</title>
+<meta name="theme-color" content="#F3ECFF" />
+<link rel="manifest" href="manifest.json" />
+<link rel="icon" href="icons/icon-192.png" />
+<link rel="apple-touch-icon" href="icons/icon-192.png" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@400;500;700;800&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+<div id="app">
+  <div id="sync-badge" class="sync-badge hidden"></div>
+
+
+  <!-- ===================== ورود / ثبت‌نام ===================== -->
+  <section id="screen-auth" class="screen">
+    <div class="brand"><span class="mark">🏆 چالش عادت‌ها</span></div>
+    <h1 id="auth-title">خوش اومدی</h1>
+    <p>برنامه‌ریزی روزانه، ساخت عادت‌های تازه، ترک عادت‌های مخرب — همراه با رقابت امتیازی بین اعضای لیگت.</p>
+    <form id="auth-form">
+      <fieldset class="fieldset">
+        <div id="auth-name-field" class="hidden">
+          <label for="auth-name">اسمی که بقیه ببینن</label>
+          <input id="auth-name" type="text" autocomplete="name" />
+        </div>
+        <label for="auth-email">ایمیل</label>
+        <input id="auth-email" type="email" required autocomplete="email" />
+        <label for="auth-password">رمز عبور</label>
+        <input id="auth-password" type="password" required minlength="6" autocomplete="current-password" />
+      </fieldset>
+      <button id="auth-submit" type="submit" class="btn btn-primary">ورود</button>
+      <div class="error" id="auth-error"></div>
+    </form>
+    <div style="text-align:center; margin-top:14px;">
+      <button id="auth-toggle" class="link-btn" type="button">حساب نداری؟ بساز</button>
+    </div>
+  </section>
+
+  <!-- ===================== ساخت/پیوستن به لیگ ===================== -->
+  <section id="screen-onboard" class="screen hidden">
+    <div class="brand">
+      <span class="mark">🏆 چالش عادت‌ها</span>
+      <button class="link-btn date" id="logout-btn" type="button">خروج</button>
+    </div>
+    <h1>یک لیگ بساز یا بهش بپیوند</h1>
+    <p>برای شرکت در رقابت امتیازی، اول باید عضو یک لیگ بشی — مثلاً لیگی با اسم خودت و همسرت.</p>
+
+    <div class="card">
+      <h2>ساخت لیگ تازه</h2>
+      <form id="create-league-form">
+        <label for="league-name-input">اسم لیگ</label>
+        <input id="league-name-input" type="text" placeholder="مثلاً: چالش من و آرش" required />
+        <button type="submit" class="btn btn-primary">بساز</button>
+      </form>
+    </div>
+
+    <div class="card">
+      <h2>پیوستن با کد دعوت</h2>
+      <form id="join-league-form">
+        <label for="league-code-input">کد دعوت</label>
+        <input id="league-code-input" type="text" placeholder="مثلاً A1B2C3" style="direction:ltr; text-transform:uppercase;" required />
+        <button type="submit" class="btn btn-secondary">پیوستن</button>
+      </form>
+    </div>
+    <div class="error" id="onboard-error"></div>
+  </section>
+
+  <!-- ===================== اپ اصلی ===================== -->
+  <section id="screen-main" class="screen hidden" style="padding-bottom:0; display:flex; flex-direction:column;">
+    <div style="padding:22px 18px 0;">
+      <div class="brand">
+        <span class="mark">🏆 چالش عادت‌ها</span>
+        <button class="link-btn date" id="logout-btn-2" type="button">خروج</button>
+      </div>
+    </div>
+
+    <!-- تب: امروز -->
+    <div class="tab-panel" data-panel="today" style="padding:0 18px 90px;">
+      <div class="brand" style="margin-bottom:16px;">
+        <h1 style="font-size:20px;">امروز</h1>
+        <span class="date" id="today-date"></span>
+      </div>
+
+      <div class="card">
+        <div class="cal-nav">
+          <button id="todo-cal-prev" class="icon-btn" type="button">› ماه قبل</button>
+          <h2 id="todo-cal-month-label" style="margin:0; font-size:14px;"></h2>
+          <button id="todo-cal-next" class="icon-btn" type="button">ماه بعد ‹</button>
+        </div>
+        <div class="cal-grid" id="todo-cal-grid"></div>
+      </div>
+
+      <h2 class="section-title">کارهای امروز</h2>
+      <div id="today-tasks-list"></div>
+
+      <h2 class="section-title">چالش عادت‌ها</h2>
+      <div id="today-list"></div>
+    </div>
+
+    <!-- تب: عادت‌ها -->
+    <div class="tab-panel hidden" data-panel="habits" style="padding:0 18px 90px;">
+      <h1 style="font-size:20px; margin-bottom:16px;">عادت‌های من</h1>
+      <div class="card">
+        <h2>عادت تازه</h2>
+        <form id="add-habit-form">
+          <label for="habit-title-input">عنوان</label>
+          <input id="habit-title-input" type="text" placeholder="مثلاً: ورزش صبحگاهی" required />
+          <label for="habit-kind-input">نوع</label>
+          <select id="habit-kind-input">
+            <option value="build">ایجاد عادت تازه</option>
+            <option value="break">ترک عادت مخرب</option>
+          </select>
+          <button type="submit" class="btn btn-primary">اضافه کن</button>
+        </form>
+      </div>
+      <div id="habits-manage-list"></div>
+    </div>
+
+    <!-- تب: کارها -->
+    <div class="tab-panel hidden" data-panel="todos" style="padding:0 18px 90px;">
+      <div class="brand" style="margin-bottom:14px;">
+        <h1 style="font-size:20px;">کارهای من</h1>
+        <button id="manage-categories-btn" class="link-btn date" type="button">⚙ دسته‌ها</button>
+      </div>
+      <form id="add-todo-form" class="btn-row" style="margin-bottom:14px;">
+        <input id="todo-title-input" type="text" placeholder="یک کار تازه بنویس..." required />
+        <button type="submit" class="btn btn-primary" style="width:70px;">＋</button>
+      </form>
+      <div class="filter-chips" id="todo-filter-chips"></div>
+      <div id="todos-list"></div>
+    </div>
+
+    <!-- مودال افزودن/ویرایش کار: دسته‌بندی + اهمیت + تقویم شمسی -->
+    <div id="todo-modal-overlay" class="modal-overlay hidden">
+      <div class="modal">
+        <div class="modal-header">
+          <h2 id="todo-modal-heading">کار تازه</h2>
+          <button id="todo-modal-close" class="icon-btn" type="button">✕</button>
+        </div>
+        <label>عنوان</label>
+        <input id="todo-modal-title-input" type="text" />
+        <label>دسته‌بندی</label>
+        <div class="cat-grid" id="todo-category-grid"></div>
+        <label>درجه‌ی اهمیت</label>
+        <div class="priority-picker" id="todo-priority-picker"></div>
+        <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
+          <input id="todo-nodate-toggle" type="checkbox" style="width:auto;" />
+          بدون تاریخ مشخص
+        </label>
+        <div id="cal-section">
+          <div class="cal-nav">
+            <button id="cal-prev" class="icon-btn" type="button">› ماه قبل</button>
+            <div id="cal-month-label"></div>
+            <button id="cal-next" class="icon-btn" type="button">ماه بعد ‹</button>
+          </div>
+          <div class="cal-grid" id="cal-grid"></div>
+        </div>
+        <button id="todo-modal-save" class="btn btn-primary" type="button">ذخیره کار</button>
+        <button id="todo-modal-delete" class="btn btn-danger hidden" type="button">حذف کار</button>
+      </div>
+    </div>
+
+    <!-- مودال روزهای تقویمِ کارها -->
+    <div id="day-tasks-overlay" class="modal-overlay hidden">
+      <div class="modal">
+        <div class="modal-header">
+          <h2 id="day-tasks-title"></h2>
+          <button id="day-tasks-close" class="icon-btn" type="button">✕</button>
+        </div>
+        <div id="day-tasks-list"></div>
+      </div>
+    </div>
+
+    <!-- مودال مدیریت دسته‌بندی‌ها -->
+    <div id="category-manage-overlay" class="modal-overlay hidden">
+      <div class="modal">
+        <div class="modal-header">
+          <h2>مدیریت دسته‌بندی‌ها</h2>
+          <button id="category-manage-close" class="icon-btn" type="button">✕</button>
+        </div>
+        <div id="category-manage-list"></div>
+        <form id="category-add-form" class="btn-row" style="margin-top:14px; align-items:center;">
+          <input id="category-add-color" type="color" value="#5B8DEF" style="width:44px; padding:4px; flex:0 0 auto;" />
+          <input id="category-add-label" type="text" placeholder="دسته‌بندی تازه..." required />
+          <button type="submit" class="btn btn-secondary" style="width:70px;">＋</button>
+        </form>
+      </div>
+    </div>
+
+    <!-- تب: لیگ -->
+    <div class="tab-panel hidden" data-panel="league" style="padding:0 18px 90px;">
+      <h1 id="league-name" style="font-size:20px; margin-bottom:16px;"></h1>
+      <div class="invite-box">
+        <span>کد دعوت: <span class="invite-code" id="league-code"></span></span>
+        <button id="copy-code-btn" class="link-btn" type="button">کپی کد دعوت</button>
+      </div>
+      <div class="card">
+        <h2>جدول امتیازات</h2>
+        <div id="leaderboard-list"></div>
+      </div>
+    </div>
+
+    <nav class="bottom-nav">
+      <button data-tab="today" class="active"><span class="ic">📅</span>امروز</button>
+      <button data-tab="habits"><span class="ic">🌱</span>عادت‌ها</button>
+      <button data-tab="todos"><span class="ic">📋</span>کارها</button>
+      <button data-tab="league"><span class="ic">🏆</span>لیگ</button>
+    </nav>
+  </section>
+
+</div>
+
+<script src="config.js"></script>
+<script src="vendor-supabase.js"></script>
+<script src="app.js"></script>
+<script>
+  // دکمه‌ی خروج بالای صفحه‌ی اصلی هم به همان منطق وصل شود
+  document.getElementById("logout-btn-2").addEventListener("click", () => sb.auth.signOut());
+</script>
+</body>
+</html>
