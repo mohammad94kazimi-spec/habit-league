@@ -630,6 +630,7 @@ function openDayTasks(iso) {
     groups[key].forEach((t) => {
       const row = document.createElement("div");
       row.className = `todo-row ${t.done ? "done" : ""}`;
+      row.dataset.id = t.id;
       if (t.description) row.title = t.description;
       row.innerHTML = `
         <button class="todo-check" data-day-toggle="${t.id}">${t.done ? "✓" : ""}</button>
@@ -649,9 +650,20 @@ el("day-tasks-overlay").addEventListener("click", (e) => {
 });
 el("day-tasks-list").addEventListener("click", async (e) => {
   const btn = e.target.closest("[data-day-toggle]");
-  if (!btn) return;
-  const t = state.todos.find((x) => x.id === btn.dataset.dayToggle);
-  if (t) await writeTodoDone(t, !t.done);
+  if (btn) {
+    const t = state.todos.find((x) => x.id === btn.dataset.dayToggle);
+    if (t) await writeTodoDone(t, !t.done);
+    return;
+  }
+  const row = e.target.closest(".todo-row");
+  if (row) {
+    const t = state.todos.find((x) => x.id === row.dataset.id);
+    if (t) {
+      // مودال ویرایش باید روی صفحه بیاد، پس مودال لیست روز بسته می‌شه
+      el("day-tasks-overlay").classList.add("hidden");
+      openEditTodoModal(t);
+    }
+  }
 });
 
 function renderToday() {
