@@ -151,11 +151,18 @@
         </div>
         <label>عنوان</label>
         <input id="todo-modal-title-input" type="text" />
+        <div id="series-scope-field" class="hidden">
+          <label>اعمال تغییرات روی</label>
+          <select id="series-scope-select">
+            <option value="single">فقط همین کار</option>
+            <option value="all">همه‌ی تکرارهای انجام‌نشده</option>
+          </select>
+        </div>
         <label>دسته‌بندی</label>
         <div class="cat-grid" id="todo-category-grid"></div>
         <label>درجه‌ی اهمیت</label>
         <div class="priority-picker" id="todo-priority-picker"></div>
-        <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
+        <label id="hasdate-label" style="display:flex; align-items:center; gap:8px; cursor:pointer;">
           <input id="todo-hasdate-toggle" type="checkbox" style="width:auto;" />
           دارای تاریخ مشخص
         </label>
@@ -202,8 +209,8 @@
               <label>فاصله (چند روز یک‌بار)</label>
               <input id="recurrence-n-input" type="number" min="2" max="60" value="2" />
             </div>
-            <label>تعداد دفعات تکرار در آینده</label>
-            <input id="recurrence-count-input" type="number" min="1" max="30" value="8" />
+            <label>تعداد کل دفعات تکرار (شامل اولین)</label>
+            <input id="recurrence-count-input" type="number" min="1" max="365" value="8" />
           </div>
         </div>
 

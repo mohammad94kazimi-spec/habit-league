@@ -149,34 +149,32 @@ function startOfWeekISO(iso) {
   const [ny, nm, nd] = d2j(j2d(jy, jm, jd) - wd);
   return jalaliToISO(ny, nm, nd);
 }
+// تعداد کل نمونه‌ها = count (شامل اولین). برای الگوی هفتگی، اولین نمونه اولین روزِ انتخاب‌شده‌ی هفته
+// در/بعد از تاریخ پایه است (اگه تاریخ پایه خودش اون روز هفته باشه، همون اولین نمونه می‌شه).
 function generateRecurrenceDates(baseISO, type, opts, count) {
   const dates = [];
   const [jy0, jm0, jd0] = isoToJalali(baseISO);
   const baseJdn = j2d(jy0, jm0, jd0);
   if (type === "daily") {
-    for (let i = 1; i <= count; i++) {
+    for (let i = 0; i < count; i++) {
       const [jy, jm, jd] = d2j(baseJdn + i);
       dates.push(jalaliToISO(jy, jm, jd));
     }
   } else if (type === "every_n") {
     const n = Math.max(2, opts.n || 2);
-    for (let i = 1; i <= count; i++) {
+    for (let i = 0; i < count; i++) {
       const [jy, jm, jd] = d2j(baseJdn + i * n);
       dates.push(jalaliToISO(jy, jm, jd));
     }
   } else if (type === "weekly") {
     const weekdays = opts.weekdays && opts.weekdays.length ? opts.weekdays : [jalaliWeekday(jy0, jm0, jd0)];
-    let offset = 1, found = 0, guard = 0;
-    while (found < count && guard < 400) {
+    const maxOffset = count * 7 + 14;
+    for (let offset = 0; dates.length < count && offset <= maxOffset; offset++) {
       const [jy, jm, jd] = d2j(baseJdn + offset);
-      if (weekdays.includes(jalaliWeekday(jy, jm, jd))) {
-        dates.push(jalaliToISO(jy, jm, jd));
-        found++;
-      }
-      offset++; guard++;
+      if (weekdays.includes(jalaliWeekday(jy, jm, jd))) dates.push(jalaliToISO(jy, jm, jd));
     }
   } else if (type === "monthly") {
-    for (let i = 1; i <= count; i++) {
+    for (let i = 0; i < count; i++) {
       let jy = jy0, jm = jm0 + i;
       while (jm > 12) { jm -= 12; jy += 1; }
       const len = jalaliMonthLength(jy, jm);
@@ -270,6 +268,13 @@ async function attemptOrQueue(networkCall, queueEntry) {
   }
 }
 
+// شرط‌های تطبیق یک عملیات صف‌شده: یا یک ستون/مقدار ساده، یا چند شرط (matches)
+function applyMatches(query, item) {
+  if (item.matches) item.matches.forEach(([col, val]) => { query = query.eq(col, val); });
+  else query = query.eq(item.matchColumn, item.matchValue);
+  return query;
+}
+
 let syncingOutbox = false;
 async function syncOutbox() {
   updateSyncBadge();
@@ -282,8 +287,8 @@ async function syncOutbox() {
     try {
       let error;
       if (item.kind === "insert") ({ error } = await sb.from(item.table).insert(item.payload));
-      else if (item.kind === "update") ({ error } = await sb.from(item.table).update(item.payload).eq(item.matchColumn, item.matchValue));
-      else if (item.kind === "delete") ({ error } = await sb.from(item.table).delete().eq(item.matchColumn, item.matchValue));
+      else if (item.kind === "update") ({ error } = await applyMatches(sb.from(item.table).update(item.payload), item));
+      else if (item.kind === "delete") ({ error } = await applyMatches(sb.from(item.table).delete(), item));
       else if (item.kind === "rpc") ({ error } = await sb.rpc(item.fnName, item.fnArgs));
       if (error) throw error;
       outbox.shift();
@@ -969,6 +974,7 @@ el("todos-list").addEventListener("click", async (e) => {
 const todoModalState = {
   editingId: null, categoryId: null, hasDate: false, selectedISO: "", priority: 3, calJY: 0, calJM: 0,
   hasTime: false, timeHour: 9, timeMinute: 0,
+  scope: "single", // "single" | "all" (فقط موقع ویرایش یک کار دوره‌ای)
   recurring: false, recurType: "daily", recurWeekdays: [], recurN: 2, recurCount: 8,
   hasDescription: false,
 };
@@ -1014,10 +1020,17 @@ function openTodoModal(title) {
   el("recurrence-options").classList.add("hidden");
   el("recurrence-count-input").value = 8;
   el("recurrence-n-input").value = 2;
+  el("recurrence-type").value = "daily";
+  el("recurrence-weekdays").classList.add("hidden");
+  el("recurrence-n-wrap").classList.add("hidden");
+  todoModalState.scope = "single";
+  el("series-scope-field").classList.add("hidden");
+  el("series-scope-select").value = "single";
   el("todo-desc-toggle").checked = false;
   el("todo-desc-wrap").classList.add("hidden");
   el("todo-desc-input").value = "";
   populateTimeSelects();
+  renderScopeUI();
   renderCategoryGrid();
   renderPriorityPicker();
   renderDateToggle();
@@ -1059,9 +1072,18 @@ function openEditTodoModal(todo) {
   el("todo-desc-toggle").checked = todoModalState.hasDescription;
   el("todo-desc-wrap").classList.toggle("hidden", !todoModalState.hasDescription);
   el("todo-desc-input").value = todo.description || "";
+  todoModalState.scope = "single";
+  const isSeries = !!todo.recurrence_group && !todo.done;
+  el("series-scope-field").classList.toggle("hidden", !isSeries);
+  el("series-scope-select").value = "single";
+  if (isSeries) {
+    const n = state.todos.filter((t) => t.recurrence_group === todo.recurrence_group && !t.done).length;
+    el("series-scope-select").options[1].textContent = `همه‌ی تکرارهای انجام‌نشده (${toFa(n)} کار)`;
+  }
   populateTimeSelects();
   el("time-hour-select").value = String(todoModalState.timeHour);
   el("time-minute-select").value = String(todoModalState.timeMinute - (todoModalState.timeMinute % 5));
+  renderScopeUI();
   renderCategoryGrid();
   renderPriorityPicker();
   renderDateToggle();
@@ -1079,6 +1101,28 @@ el("todo-modal-overlay").addEventListener("click", (e) => {
 
 el("todo-modal-delete").addEventListener("click", async () => {
   if (!todoModalState.editingId) return;
+  const current = state.todos.find((t) => t.id === todoModalState.editingId);
+
+  if (todoModalState.scope === "all" && current && current.recurrence_group) {
+    const gid = current.recurrence_group;
+    const targets = state.todos.filter((t) => t.recurrence_group === gid && !t.done);
+    if (!confirm(`همه‌ی ${toFa(targets.length)} تکرارِ انجام‌نشده‌ی این کار دوره‌ای حذف بشن؟ (کارهای انجام‌شده می‌مونن)`)) return;
+    const ids = new Set(targets.map((t) => t.id));
+    state.todos = state.todos.filter((t) => !ids.has(t.id));
+    closeTodoModal();
+    renderTodos(); renderCompletedTodos(); renderTodayTasks(); renderTodoCalendar();
+    const res = await attemptOrQueue(
+      () => sb.from("todos").delete().eq("recurrence_group", gid).eq("done", false),
+      { kind: "delete", table: "todos", matches: [["recurrence_group", gid], ["done", false]] }
+    );
+    if (!res.ok && !res.queued) {
+      state.todos.push(...targets);
+      alert(res.error.message);
+      renderTodos(); renderCompletedTodos(); renderTodayTasks(); renderTodoCalendar();
+    }
+    return;
+  }
+
   if (!confirm("این کار حذف بشه؟")) return;
   const id = todoModalState.editingId;
   const removed = state.todos.find((t) => t.id === id);
@@ -1142,15 +1186,31 @@ function renderPriorityPicker() {
 }
 
 function renderDateToggle() {
+  // وقتی تغییرات روی «همه‌ی تکرارها» اعمال می‌شه، تاریخ هر نمونه جدا می‌مونه؛ فقط زمان مشترکه
+  const seriesAll = todoModalState.scope === "all";
+  el("hasdate-label").classList.toggle("hidden", seriesAll);
   el("todo-hasdate-toggle").checked = todoModalState.hasDate;
-  el("cal-section").classList.toggle("hidden", !todoModalState.hasDate);
-  el("hastime-label").classList.toggle("hidden", !todoModalState.hasDate);
-  if (!todoModalState.hasDate) {
+  el("cal-section").classList.toggle("hidden", seriesAll || !todoModalState.hasDate);
+  el("hastime-label").classList.toggle("hidden", !(seriesAll || todoModalState.hasDate));
+  if (!seriesAll && !todoModalState.hasDate) {
     todoModalState.hasTime = false;
     el("todo-hastime-toggle").checked = false;
   }
   renderTimeToggle();
 }
+// برچسب دکمه‌ها بر اساس دامنه‌ی تغییرات (فقط همین کار / همه‌ی تکرارها)
+function renderScopeUI() {
+  const all = todoModalState.scope === "all";
+  if (todoModalState.editingId) {
+    el("todo-modal-save").textContent = all ? "بروزرسانی همه‌ی تکرارها" : "بروزرسانی کار";
+    el("todo-modal-delete").textContent = all ? "حذف همه‌ی تکرارهای انجام‌نشده" : "حذف کار";
+  }
+}
+el("series-scope-select").addEventListener("change", (e) => {
+  todoModalState.scope = e.target.value;
+  renderScopeUI();
+  renderDateToggle();
+});
 el("todo-hasdate-toggle").addEventListener("change", (e) => {
   todoModalState.hasDate = e.target.checked;
   todoModalState.selectedISO = todoModalState.hasDate ? (todoModalState.selectedISO || todayISO()) : "";
@@ -1218,7 +1278,7 @@ el("recurrence-n-input").addEventListener("input", (e) => {
   todoModalState.recurN = parseInt(e.target.value, 10) || 2;
 });
 el("recurrence-count-input").addEventListener("input", (e) => {
-  todoModalState.recurCount = Math.min(30, Math.max(1, parseInt(e.target.value, 10) || 1));
+  todoModalState.recurCount = Math.min(365, Math.max(1, parseInt(e.target.value, 10) || 1));
 });
 
 // ---------- توضیحات ----------
@@ -1286,7 +1346,35 @@ el("todo-modal-save").addEventListener("click", async () => {
       : null,
     description: description || null,
   };
-  if (todoModalState.editingId) {
+  if (todoModalState.editingId && todoModalState.scope === "all") {
+    // تغییر یک‌جا برای همه‌ی تکرارهای انجام‌نشده‌ی این کار دوره‌ای (تاریخ هر نمونه دست‌نخورده می‌مونه)
+    const todo = state.todos.find((t) => t.id === todoModalState.editingId);
+    if (!todo || !todo.recurrence_group) { closeTodoModal(); return; }
+    const gid = todo.recurrence_group;
+    const seriesPayload = {
+      title,
+      category_id: todoModalState.categoryId,
+      priority: todoModalState.priority,
+      due_time: todoModalState.hasTime
+        ? `${String(todoModalState.timeHour).padStart(2, "0")}:${String(todoModalState.timeMinute).padStart(2, "0")}`
+        : null,
+      description: description || null,
+    };
+    const targets = state.todos.filter((t) => t.recurrence_group === gid && !t.done);
+    const prevs = targets.map((t) => ({ t, prev: { ...t } }));
+    targets.forEach((t) => Object.assign(t, seriesPayload));
+    closeTodoModal();
+    renderTodos(); renderCompletedTodos(); renderTodayTasks(); renderTodoCalendar();
+    const result = await attemptOrQueue(
+      () => sb.from("todos").update(seriesPayload).eq("recurrence_group", gid).eq("done", false),
+      { kind: "update", table: "todos", payload: seriesPayload, matches: [["recurrence_group", gid], ["done", false]] }
+    );
+    if (!result.ok && !result.queued) {
+      prevs.forEach(({ t, prev }) => Object.assign(t, prev));
+      alert(result.error.message);
+      renderTodos(); renderCompletedTodos(); renderTodayTasks(); renderTodoCalendar();
+    }
+  } else if (todoModalState.editingId) {
     const todo = state.todos.find((t) => t.id === todoModalState.editingId);
     if (!todo) { closeTodoModal(); return; }
     const prev = { ...todo };
@@ -1307,13 +1395,16 @@ el("todo-modal-save").addEventListener("click", async () => {
     let newRows;
     if (todoModalState.recurring && todoModalState.hasDate) {
       const groupId = crypto.randomUUID();
-      const futureDates = generateRecurrenceDates(
+      // مقادیر را مستقیم از خود فرم می‌خوانیم تا هیچ‌وقت با state قدیمی ناسازگار نشن
+      const recurType = el("recurrence-type").value;
+      const recurCount = Math.min(365, Math.max(1, parseInt(el("recurrence-count-input").value, 10) || 1));
+      const recurN = Math.max(2, parseInt(el("recurrence-n-input").value, 10) || 2);
+      const allDates = generateRecurrenceDates(
         todoModalState.selectedISO,
-        todoModalState.recurType,
-        { weekdays: todoModalState.recurWeekdays, n: todoModalState.recurN },
-        todoModalState.recurCount
+        recurType,
+        { weekdays: todoModalState.recurWeekdays, n: recurN },
+        recurCount
       );
-      const allDates = [todoModalState.selectedISO, ...futureDates];
       newRows = allDates.map((iso) => ({
         id: crypto.randomUUID(),
         created_at: new Date().toISOString(),
