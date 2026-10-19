@@ -1,4 +1,4 @@
-const SHELL_CACHE = "habit-league-shell-v3";
+const SHELL_CACHE = "habit-league-shell-v4";
 const DATA_CACHE = "habit-league-data-v1";
 const SHELL_FILES = [
   "./",
@@ -51,7 +51,9 @@ self.addEventListener("fetch", (event) => {
 
   // درخواست‌های خواندنیِ Supabase: اول شبکه (تازه‌ترین دیتا)، اگه آفلاین بودی از کش
   const isSupabase = url.hostname.endsWith(".supabase.co");
-  if (isSupabase && event.request.method === "GET") {
+  // فایل‌های Storage (مثل فایل‌های صوتی) بزرگ و درخواست‌هاشون Range-دارن؛ کش‌شون نمی‌کنیم
+  const isStorage = url.pathname.startsWith("/storage/");
+  if (isSupabase && !isStorage && event.request.method === "GET") {
     event.respondWith(
       fetch(event.request)
         .then((res) => {

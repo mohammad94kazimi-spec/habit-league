@@ -177,6 +177,8 @@ create table if not exists todos (
   description text,
   completed_at timestamptz,
   recurrence_group uuid,
+  audio_path text,
+  audio_name text,
   created_at timestamptz not null default now()
 );
 
@@ -258,3 +260,17 @@ create policy "todos_all_own" on todos for all using (user_id = auth.uid()) with
 
 -- categories: فقط خود کاربر
 create policy "categories_all_own" on categories for all using (user_id = auth.uid()) with check (user_id = auth.uid());
+
+-- ---------- ضمیمه‌ی فایل صوتی کارها (Storage) ----------
+insert into storage.buckets (id, name, public, file_size_limit)
+values ('task-audio', 'task-audio', false, 10485760)
+on conflict (id) do update set file_size_limit = 10485760, public = false;
+
+create policy "task_audio_select_own" on storage.objects for select to authenticated
+  using (bucket_id = 'task-audio' and (storage.foldername(name))[1] = auth.uid()::text);
+create policy "task_audio_insert_own" on storage.objects for insert to authenticated
+  with check (bucket_id = 'task-audio' and (storage.foldername(name))[1] = auth.uid()::text);
+create policy "task_audio_update_own" on storage.objects for update to authenticated
+  using (bucket_id = 'task-audio' and (storage.foldername(name))[1] = auth.uid()::text);
+create policy "task_audio_delete_own" on storage.objects for delete to authenticated
+  using (bucket_id = 'task-audio' and (storage.foldername(name))[1] = auth.uid()::text);

@@ -222,6 +222,18 @@
           <textarea id="todo-desc-input" rows="3" placeholder="توضیحات کار..." class="desc-textarea"></textarea>
         </div>
 
+        <label>فایل صوتی (اختیاری)</label>
+        <input id="audio-file-input" type="file" accept="audio/*" class="hidden" />
+        <button id="audio-pick-btn" class="btn btn-secondary" type="button" style="margin-top:0;">🎧 افزودن فایل صوتی</button>
+        <div id="audio-current" class="audio-current hidden">
+          <div class="audio-row">
+            <span id="audio-name" class="audio-name"></span>
+            <button id="audio-remove-btn" class="icon-btn" type="button" title="حذف فایل صوتی">✕</button>
+          </div>
+          <audio id="audio-player" controls preload="none" class="audio-player hidden"></audio>
+          <div id="audio-note" class="audio-note hidden"></div>
+        </div>
+
         <button id="todo-modal-save" class="btn btn-primary" type="button">ذخیره کار</button>
         <button id="todo-modal-delete" class="btn btn-danger hidden" type="button">حذف کار</button>
       </div>

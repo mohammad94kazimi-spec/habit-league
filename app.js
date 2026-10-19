@@ -636,7 +636,7 @@ function openDayTasks(iso) {
         <button class="todo-check" data-day-toggle="${t.id}">${t.done ? "✓" : ""}</button>
         <div class="todo-body">
           <div class="todo-title">${escapeHtml(t.title)}</div>
-          <div class="todo-meta"><span class="priority-pill">${"★".repeat(t.priority)}${"☆".repeat(5 - t.priority)}</span></div>
+          <div class="todo-meta"><span class="priority-pill">${"★".repeat(t.priority)}${"☆".repeat(5 - t.priority)}</span>${audioBadge(t)}</div>
         </div>`;
       section.appendChild(row);
     });
@@ -719,6 +719,7 @@ function renderTodayTasks() {
           <span class="cat-pill" style="background:${cat.color}22; color:${cat.color};">${cat.label}</span>
           <span class="priority-pill">${"★".repeat(t.priority)}${"☆".repeat(5 - t.priority)}</span>
           ${t.due_time ? `<span class="todo-date">${toFa(t.due_time.split(":")[0])}:${toFa(t.due_time.split(":")[1])}</span>` : ""}
+          ${audioBadge(t)}
         </div>
       </div>`;
     wrap.appendChild(row);
@@ -879,13 +880,28 @@ function formatDueLabel(t) {
   return label;
 }
 
+// نشان کوچک برای کارهایی که فایل صوتی ضمیمه دارن
+function audioBadge(t) {
+  return t.audio_path ? `<span class="todo-date" title="${escapeHtml(t.audio_name || "فایل صوتی")}">🎧</span>` : "";
+}
+
 function renderTodos() {
   const wrap = el("todos-list");
   wrap.innerHTML = "";
   const cutoff = addDaysISO(todayISO(), 6); // نهایت ۷ روز آینده (امروز تا ۶ روز بعد) + کارهای عقب‌افتاده و بدون‌تاریخ
-  let list = state.todos.filter((t) => !t.done && (!t.due_date || t.due_date <= cutoff));
+  let list = state.todos.filter((t) => !t.done);
   if (state.todoFilter === "none") list = list.filter((t) => !t.category_id);
   else if (state.todoFilter !== "all") list = list.filter((t) => t.category_id === state.todoFilter);
+
+  // از هر کار دوره‌ای فقط نزدیک‌ترین نمونه‌ی انجام‌نشده نشون داده می‌شه تا لیست شلوغ نشه
+  const firstOfGroup = new Map();
+  list.forEach((t) => {
+    if (!t.recurrence_group) return;
+    const cur = firstOfGroup.get(t.recurrence_group);
+    if (!cur || (t.due_date || "9999") < (cur.due_date || "9999")) firstOfGroup.set(t.recurrence_group, t);
+  });
+  list = list.filter((t) => !t.recurrence_group || firstOfGroup.get(t.recurrence_group) === t);
+  list = list.filter((t) => !t.due_date || t.due_date <= cutoff);
 
   if (!list.length) {
     wrap.innerHTML = `<div class="empty-state"><div class="big">📋</div>کاری ثبت نشده.</div>`;
@@ -900,6 +916,9 @@ function renderTodos() {
   });
   sorted.forEach((t) => {
     const cat = categoryById(t.category_id);
+    const more = t.recurrence_group
+      ? state.todos.filter((x) => x.recurrence_group === t.recurrence_group && !x.done).length - 1
+      : 0;
     const row = document.createElement("div");
     row.className = `todo-row ${t.done ? "done" : ""}`;
     row.dataset.id = t.id;
@@ -912,7 +931,8 @@ function renderTodos() {
           <span class="cat-pill" style="background:${cat.color}22; color:${cat.color};">${cat.label}</span>
           <span class="priority-pill">${"★".repeat(t.priority)}${"☆".repeat(5 - t.priority)}</span>
           <span class="todo-date">${formatDueLabel(t)}</span>
-          ${t.recurrence_group ? `<span class="todo-date">🔁</span>` : ""}
+          ${t.recurrence_group ? `<span class="todo-date">🔁${more > 0 ? ` ${toFa(more)} تکرار دیگر` : ""}</span>` : ""}
+          ${audioBadge(t)}
         </div>
       </div>`;
     wrap.appendChild(row);
@@ -944,6 +964,7 @@ function renderCompletedTodos() {
         <div class="todo-meta">
           <span class="cat-pill" style="background:${cat.color}22; color:${cat.color};">${cat.label}</span>
           ${t.completed_at ? `<span class="completed-date">انجام شد: ${isoToJalaliLabel(t.completed_at.slice(0, 10))}</span>` : ""}
+          ${audioBadge(t)}
         </div>
       </div>`;
     wrap.appendChild(row);
@@ -989,7 +1010,103 @@ const todoModalState = {
   scope: "single", // "single" | "all" (فقط موقع ویرایش یک کار دوره‌ای)
   recurring: false, recurType: "daily", recurWeekdays: [], recurN: 2, recurCount: 8,
   hasDescription: false,
+  audioFile: null,      // فایلی که توی همین مودال انتخاب شده و هنوز آپلود نشده
+  audioExisting: null,  // {path, name} فایل ضمیمه‌ی فعلیِ کار (موقع ویرایش)
+  audioRemoved: false,  // کاربر فایل فعلی رو حذف کرده
 };
+
+// ---------- فایل صوتی ضمیمه ----------
+const AUDIO_BUCKET = "task-audio";
+const AUDIO_MAX_BYTES = 10 * 1024 * 1024;
+const AUDIO_MIME_BY_EXT = {
+  mp3: "audio/mpeg", m4a: "audio/mp4", aac: "audio/aac", wav: "audio/wav", ogg: "audio/ogg",
+  oga: "audio/ogg", opus: "audio/ogg", webm: "audio/webm", amr: "audio/amr", "3gp": "audio/3gpp", flac: "audio/flac",
+};
+let audioPreviewUrl = null;
+let audioRenderToken = 0;
+
+function fileExt(name) {
+  return ((name || "").split(".").pop() || "").toLowerCase().replace(/[^a-z0-9]/g, "").slice(0, 5);
+}
+function stopAudioPreview() {
+  const player = el("audio-player");
+  try { player.pause(); } catch (e) { /* ignore */ }
+  player.removeAttribute("src");
+  if (audioPreviewUrl) { URL.revokeObjectURL(audioPreviewUrl); audioPreviewUrl = null; }
+}
+
+async function renderAudioField() {
+  const token = ++audioRenderToken;
+  const cur = el("audio-current"), nameEl = el("audio-name"), player = el("audio-player"), note = el("audio-note");
+  stopAudioPreview();
+  player.classList.add("hidden");
+  note.classList.add("hidden");
+  const f = todoModalState.audioFile;
+  const ex = todoModalState.audioExisting;
+  if (f) {
+    cur.classList.remove("hidden");
+    nameEl.textContent = f.name;
+    audioPreviewUrl = URL.createObjectURL(f);
+    player.src = audioPreviewUrl;
+    player.classList.remove("hidden");
+    el("audio-pick-btn").textContent = "🎧 جایگزینی فایل صوتی";
+  } else if (ex && !todoModalState.audioRemoved) {
+    cur.classList.remove("hidden");
+    nameEl.textContent = ex.name || "فایل صوتی";
+    el("audio-pick-btn").textContent = "🎧 جایگزینی فایل صوتی";
+    if (!navigator.onLine) {
+      note.textContent = "پخش فایل فقط وقتی آنلاین باشی ممکنه.";
+      note.classList.remove("hidden");
+      return;
+    }
+    try {
+      const { data, error } = await sb.storage.from(AUDIO_BUCKET).createSignedUrl(ex.path, 3600);
+      if (token !== audioRenderToken) return; // در این فاصله مودال عوض شده
+      if (error || !data) throw error || new Error("no url");
+      player.src = data.signedUrl;
+      player.classList.remove("hidden");
+    } catch (err) {
+      if (token !== audioRenderToken) return;
+      note.textContent = "بارگذاری فایل صوتی ناموفق بود.";
+      note.classList.remove("hidden");
+    }
+  } else {
+    cur.classList.add("hidden");
+    el("audio-pick-btn").textContent = "🎧 افزودن فایل صوتی";
+  }
+}
+
+el("audio-pick-btn").addEventListener("click", () => el("audio-file-input").click());
+el("audio-file-input").addEventListener("change", (e) => {
+  const f = e.target.files && e.target.files[0];
+  e.target.value = ""; // تا انتخاب دوباره‌ی همون فایل هم کار کنه
+  if (!f) return;
+  const looksAudio = (f.type || "").startsWith("audio/") || !!AUDIO_MIME_BY_EXT[fileExt(f.name)];
+  if (!looksAudio) { alert("فقط فایل صوتی (مثل mp3، m4a، wav) قابل ضمیمه‌ست."); return; }
+  if (f.size > AUDIO_MAX_BYTES) { alert("حجم فایل صوتی نباید بیشتر از ۱۰ مگابایت باشه."); return; }
+  todoModalState.audioFile = f;
+  renderAudioField();
+});
+el("audio-remove-btn").addEventListener("click", () => {
+  if (todoModalState.audioFile) todoModalState.audioFile = null;
+  else if (todoModalState.audioExisting) todoModalState.audioRemoved = true;
+  renderAudioField();
+});
+
+async function uploadTaskAudio(file, folderId) {
+  const path = `${state.user.id}/${folderId}/${crypto.randomUUID()}.${fileExt(file.name) || "audio"}`;
+  const contentType = file.type || AUDIO_MIME_BY_EXT[fileExt(file.name)] || "audio/mpeg";
+  const { error } = await sb.storage.from(AUDIO_BUCKET).upload(path, file, { contentType, upsert: false });
+  if (error) throw error;
+  return path;
+}
+
+// فایل‌هایی که دیگه هیچ کاری بهشون اشاره نمی‌کنه از Storage پاک می‌شن (بهترین‌تلاش، آنلاین)
+async function removeOrphanAudio(paths) {
+  const orphans = [...new Set((paths || []).filter(Boolean))].filter((pth) => !state.todos.some((t) => t.audio_path === pth));
+  if (!orphans.length || !navigator.onLine) return;
+  try { await sb.storage.from(AUDIO_BUCKET).remove(orphans); } catch (err) { console.error("audio cleanup failed", err); }
+}
 
 function populateTimeSelects() {
   const hourSel = el("time-hour-select");
@@ -1022,6 +1139,9 @@ function openTodoModal(title) {
   todoModalState.recurN = 2;
   todoModalState.recurCount = 8;
   todoModalState.hasDescription = false;
+  todoModalState.audioFile = null;
+  todoModalState.audioExisting = null;
+  todoModalState.audioRemoved = false;
   el("todo-modal-heading").textContent = "کار تازه";
   el("todo-modal-title-input").value = title;
   el("todo-modal-save").textContent = "ذخیره کار";
@@ -1042,6 +1162,7 @@ function openTodoModal(title) {
   el("todo-desc-wrap").classList.add("hidden");
   el("todo-desc-input").value = "";
   populateTimeSelects();
+  renderAudioField();
   renderScopeUI();
   renderCategoryGrid();
   renderPriorityPicker();
@@ -1075,6 +1196,9 @@ function openEditTodoModal(todo) {
   }
   todoModalState.recurring = false;
   todoModalState.hasDescription = !!todo.description;
+  todoModalState.audioFile = null;
+  todoModalState.audioExisting = todo.audio_path ? { path: todo.audio_path, name: todo.audio_name } : null;
+  todoModalState.audioRemoved = false;
   el("todo-modal-heading").textContent = "ویرایش کار";
   el("todo-modal-title-input").value = todo.title;
   el("todo-modal-save").textContent = "بروزرسانی کار";
@@ -1095,6 +1219,7 @@ function openEditTodoModal(todo) {
   populateTimeSelects();
   el("time-hour-select").value = String(todoModalState.timeHour);
   el("time-minute-select").value = String(todoModalState.timeMinute - (todoModalState.timeMinute % 5));
+  renderAudioField();
   renderScopeUI();
   renderCategoryGrid();
   renderPriorityPicker();
@@ -1105,6 +1230,7 @@ function openEditTodoModal(todo) {
 
 function closeTodoModal() {
   el("todo-modal-overlay").classList.add("hidden");
+  stopAudioPreview();
 }
 el("todo-modal-close").addEventListener("click", closeTodoModal);
 el("todo-modal-overlay").addEventListener("click", (e) => {
@@ -1131,6 +1257,8 @@ el("todo-modal-delete").addEventListener("click", async () => {
       state.todos.push(...targets);
       alert(res.error.message);
       renderTodos(); renderCompletedTodos(); renderTodayTasks(); renderTodoCalendar();
+    } else {
+      removeOrphanAudio(targets.map((t) => t.audio_path));
     }
     return;
   }
@@ -1155,6 +1283,8 @@ el("todo-modal-delete").addEventListener("click", async () => {
     renderCompletedTodos();
     renderTodayTasks();
     renderTodoCalendar();
+  } else if (removed) {
+    removeOrphanAudio([removed.audio_path]);
   }
 });
 
@@ -1358,6 +1488,38 @@ el("todo-modal-save").addEventListener("click", async () => {
       : null,
     description: description || null,
   };
+
+  // شناسه‌ها از قبل ساخته می‌شن تا فایل صوتی توی پوشه‌ی درست آپلود بشه
+  const beingEdited = todoModalState.editingId ? state.todos.find((t) => t.id === todoModalState.editingId) : null;
+  const seriesAll = !!(beingEdited && todoModalState.scope === "all" && beingEdited.recurrence_group);
+  const isRecurringCreate = !todoModalState.editingId && todoModalState.recurring && todoModalState.hasDate;
+  const newGroupId = isRecurringCreate ? crypto.randomUUID() : null;
+  const singleNewId = !todoModalState.editingId && !isRecurringCreate ? crypto.randomUUID() : null;
+
+  let audioPatch = null; // فیلدهای صوتی که باید توی دیتابیس عوض بشن
+  if (todoModalState.audioFile) {
+    if (!navigator.onLine) { alert("برای ضمیمه کردن فایل صوتی باید آنلاین باشی."); return; }
+    const folderId = seriesAll ? beingEdited.recurrence_group : isRecurringCreate ? newGroupId : beingEdited ? beingEdited.id : singleNewId;
+    const saveBtn = el("todo-modal-save");
+    const oldLabel = saveBtn.textContent;
+    saveBtn.disabled = true;
+    saveBtn.textContent = "در حال آپلود فایل صوتی…";
+    try {
+      const path = await uploadTaskAudio(todoModalState.audioFile, folderId);
+      audioPatch = { audio_path: path, audio_name: todoModalState.audioFile.name };
+    } catch (err) {
+      alert("آپلود فایل صوتی ناموفق بود: " + (err && err.message ? err.message : err));
+      return;
+    } finally {
+      saveBtn.disabled = false;
+      saveBtn.textContent = oldLabel;
+    }
+  } else if (todoModalState.audioRemoved) {
+    audioPatch = { audio_path: null, audio_name: null };
+  }
+  if (audioPatch) Object.assign(payload, audioPatch);
+  const newAudioPath = audioPatch && audioPatch.audio_path ? audioPatch.audio_path : null;
+
   if (todoModalState.editingId && todoModalState.scope === "all") {
     // تغییر یک‌جا برای همه‌ی تکرارهای انجام‌نشده‌ی این کار دوره‌ای (تاریخ هر نمونه دست‌نخورده می‌مونه)
     const todo = state.todos.find((t) => t.id === todoModalState.editingId);
@@ -1372,6 +1534,7 @@ el("todo-modal-save").addEventListener("click", async () => {
         : null,
       description: description || null,
     };
+    if (audioPatch) Object.assign(seriesPayload, audioPatch);
     const targets = state.todos.filter((t) => t.recurrence_group === gid && !t.done);
     const prevs = targets.map((t) => ({ t, prev: { ...t } }));
     targets.forEach((t) => Object.assign(t, seriesPayload));
@@ -1385,6 +1548,9 @@ el("todo-modal-save").addEventListener("click", async () => {
       prevs.forEach(({ t, prev }) => Object.assign(t, prev));
       alert(result.error.message);
       renderTodos(); renderCompletedTodos(); renderTodayTasks(); renderTodoCalendar();
+      removeOrphanAudio([newAudioPath]);
+    } else if (audioPatch) {
+      removeOrphanAudio(prevs.map(({ prev }) => prev.audio_path));
     }
   } else if (todoModalState.editingId) {
     const todo = state.todos.find((t) => t.id === todoModalState.editingId);
@@ -1401,12 +1567,15 @@ el("todo-modal-save").addEventListener("click", async () => {
       Object.assign(todo, prev);
       alert(result.error.message);
       renderTodos(); renderCompletedTodos(); renderTodayTasks(); renderTodoCalendar();
+      removeOrphanAudio([newAudioPath]);
+    } else if (audioPatch) {
+      removeOrphanAudio([prev.audio_path]);
     }
   } else {
     const common = { user_id: state.user.id, done: false, completed_at: null, ...payload };
     let newRows;
     if (todoModalState.recurring && todoModalState.hasDate) {
-      const groupId = crypto.randomUUID();
+      const groupId = newGroupId;
       // مقادیر را مستقیم از خود فرم می‌خوانیم تا هیچ‌وقت با state قدیمی ناسازگار نشن
       const recurType = el("recurrence-type").value;
       const recurCount = Math.min(365, Math.max(1, parseInt(el("recurrence-count-input").value, 10) || 1));
@@ -1425,7 +1594,7 @@ el("todo-modal-save").addEventListener("click", async () => {
         due_date: iso,
       }));
     } else {
-      newRows = [{ id: crypto.randomUUID(), created_at: new Date().toISOString(), recurrence_group: null, ...common }];
+      newRows = [{ id: singleNewId, created_at: new Date().toISOString(), recurrence_group: null, ...common }];
     }
     state.todos.push(...newRows);
     closeTodoModal();
@@ -1439,6 +1608,7 @@ el("todo-modal-save").addEventListener("click", async () => {
       state.todos = state.todos.filter((t) => !ids.has(t.id));
       alert(result.error.message);
       renderTodos(); renderCompletedTodos(); renderTodayTasks(); renderTodoCalendar();
+      removeOrphanAudio([newAudioPath]);
     }
   }
 });
