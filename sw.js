@@ -1,4 +1,4 @@
-const SHELL_CACHE = "habit-league-shell-v4";
+const SHELL_CACHE = "habit-league-shell-v5";
 const DATA_CACHE = "habit-league-data-v1";
 const SHELL_FILES = [
   "./",

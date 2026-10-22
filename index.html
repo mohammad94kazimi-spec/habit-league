@@ -224,7 +224,16 @@
 
         <label>فایل صوتی (اختیاری)</label>
         <input id="audio-file-input" type="file" accept="audio/*" class="hidden" />
-        <button id="audio-pick-btn" class="btn btn-secondary" type="button" style="margin-top:0;">🎧 افزودن فایل صوتی</button>
+        <div id="audio-actions" class="btn-row">
+          <button id="audio-pick-btn" class="btn btn-secondary" type="button">🎧 افزودن فایل صوتی</button>
+          <button id="audio-record-btn" class="btn btn-secondary" type="button">🎙 ضبط صدا</button>
+        </div>
+        <div id="audio-recording" class="audio-recording hidden">
+          <span class="rec-dot"></span>
+          <span id="audio-rec-timer" class="rec-timer">۰۰:۰۰</span>
+          <button id="audio-rec-stop" class="btn btn-primary" type="button">⏹ پایان ضبط</button>
+          <button id="audio-rec-cancel" class="btn btn-secondary" type="button">لغو</button>
+        </div>
         <div id="audio-current" class="audio-current hidden">
           <div class="audio-row">
             <span id="audio-name" class="audio-name"></span>

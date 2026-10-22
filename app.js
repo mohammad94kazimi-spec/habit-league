@@ -1074,7 +1074,108 @@ async function renderAudioField() {
     cur.classList.add("hidden");
     el("audio-pick-btn").textContent = "🎧 افزودن فایل صوتی";
   }
+  el("audio-record-btn").textContent = (f || (ex && !todoModalState.audioRemoved)) ? "🎙 ضبط مجدد" : "🎙 ضبط صدا";
 }
+
+// ---------- ضبط مستقیم صدا (MediaRecorder) ----------
+const rec = { recorder: null, stream: null, chunks: [], bytes: 0, startedAt: 0, timer: null, mime: "", cancelled: false, stopPromise: null };
+
+function recorderSupported() {
+  return !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia && window.MediaRecorder);
+}
+function pickRecorderMime() {
+  const candidates = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4", "audio/ogg;codecs=opus"];
+  return candidates.find((m) => typeof MediaRecorder.isTypeSupported === "function" && MediaRecorder.isTypeSupported(m)) || "";
+}
+function fmtTimer(sec) {
+  const t = Math.floor(sec);
+  return toFa(`${String(Math.floor(t / 60)).padStart(2, "0")}:${String(t % 60).padStart(2, "0")}`);
+}
+function renderRecordingUI() {
+  const active = !!rec.recorder;
+  el("audio-recording").classList.toggle("hidden", !active);
+  el("audio-actions").classList.toggle("hidden", active);
+}
+
+async function startRecording() {
+  if (rec.recorder) return;
+  if (!recorderSupported()) { alert("این مرورگر ضبط صدا رو پشتیبانی نمی‌کنه."); return; }
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch (err) {
+    alert("دسترسی به میکروفون داده نشد. از تنظیمات مرورگر، اجازه‌ی میکروفون رو برای این سایت فعال کن.");
+    return;
+  }
+  const mime = pickRecorderMime();
+  let recorder;
+  try {
+    recorder = mime ? new MediaRecorder(stream, { mimeType: mime }) : new MediaRecorder(stream);
+  } catch (err) {
+    stream.getTracks().forEach((t) => t.stop());
+    alert("شروع ضبط ممکن نشد.");
+    return;
+  }
+  rec.recorder = recorder;
+  rec.stream = stream;
+  rec.chunks = [];
+  rec.bytes = 0;
+  rec.cancelled = false;
+  rec.mime = recorder.mimeType || mime || "audio/webm";
+  rec.startedAt = Date.now();
+
+  recorder.ondataavailable = (e) => {
+    if (!e.data || !e.data.size) return;
+    rec.chunks.push(e.data);
+    rec.bytes += e.data.size;
+    if (rec.bytes >= AUDIO_MAX_BYTES * 0.95 && recorder.state === "recording") {
+      recorder.stop(); // به سقف حجم رسیدیم
+      setTimeout(() => alert("ضبط به سقف ۱۰ مگابایت رسید و متوقف شد."), 0);
+    }
+  };
+  rec.stopPromise = new Promise((resolve) => {
+    recorder.onstop = () => {
+      clearInterval(rec.timer);
+      rec.timer = null;
+      rec.stream.getTracks().forEach((t) => t.stop()); // میکروفون آزاد می‌شه
+      const cancelled = rec.cancelled;
+      const mimeType = rec.mime.split(";")[0];
+      const blob = new Blob(rec.chunks, { type: mimeType });
+      rec.recorder = null;
+      rec.stream = null;
+      rec.chunks = [];
+      renderRecordingUI();
+      if (cancelled || !blob.size) { resolve(null); return; }
+      const ext = mimeType.includes("mp4") ? "m4a" : mimeType.includes("ogg") ? "ogg" : "webm";
+      const d = new Date();
+      const name = `ضبط صدا ${toFa(String(d.getHours()).padStart(2, "0"))}:${toFa(String(d.getMinutes()).padStart(2, "0"))}.${ext}`;
+      const file = new File([blob], name, { type: mimeType });
+      if (file.size > AUDIO_MAX_BYTES) { alert("حجم فایل ضبط‌شده بیشتر از ۱۰ مگابایته."); resolve(null); return; }
+      todoModalState.audioFile = file;
+      renderAudioField();
+      resolve(file);
+    };
+  });
+  recorder.start(1000);
+  el("audio-rec-timer").textContent = fmtTimer(0);
+  rec.timer = setInterval(() => { el("audio-rec-timer").textContent = fmtTimer((Date.now() - rec.startedAt) / 1000); }, 500);
+  renderRecordingUI();
+}
+function stopRecording() {
+  if (!rec.recorder) return Promise.resolve(null);
+  const p = rec.stopPromise;
+  if (rec.recorder.state !== "inactive") rec.recorder.stop();
+  return p;
+}
+function cancelRecording() {
+  if (!rec.recorder) return;
+  rec.cancelled = true;
+  if (rec.recorder.state !== "inactive") rec.recorder.stop();
+}
+el("audio-record-btn").addEventListener("click", startRecording);
+el("audio-rec-stop").addEventListener("click", stopRecording);
+el("audio-rec-cancel").addEventListener("click", cancelRecording);
+if (!recorderSupported()) el("audio-record-btn").classList.add("hidden");
 
 el("audio-pick-btn").addEventListener("click", () => el("audio-file-input").click());
 el("audio-file-input").addEventListener("change", (e) => {
@@ -1139,6 +1240,7 @@ function openTodoModal(title) {
   todoModalState.recurN = 2;
   todoModalState.recurCount = 8;
   todoModalState.hasDescription = false;
+  cancelRecording();
   todoModalState.audioFile = null;
   todoModalState.audioExisting = null;
   todoModalState.audioRemoved = false;
@@ -1196,6 +1298,7 @@ function openEditTodoModal(todo) {
   }
   todoModalState.recurring = false;
   todoModalState.hasDescription = !!todo.description;
+  cancelRecording();
   todoModalState.audioFile = null;
   todoModalState.audioExisting = todo.audio_path ? { path: todo.audio_path, name: todo.audio_name } : null;
   todoModalState.audioRemoved = false;
@@ -1230,6 +1333,7 @@ function openEditTodoModal(todo) {
 
 function closeTodoModal() {
   el("todo-modal-overlay").classList.add("hidden");
+  cancelRecording();
   stopAudioPreview();
 }
 el("todo-modal-close").addEventListener("click", closeTodoModal);
@@ -1477,6 +1581,7 @@ el("cal-next").addEventListener("click", () => {
 el("todo-modal-save").addEventListener("click", async () => {
   const title = el("todo-modal-title-input").value.trim();
   if (!title) { alert("عنوان کار را بنویس"); return; }
+  if (rec.recorder) await stopRecording();
   const description = todoModalState.hasDescription ? el("todo-desc-input").value.trim() : null;
   const payload = {
     title,
