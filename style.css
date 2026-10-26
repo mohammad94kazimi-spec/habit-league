@@ -1,3 +1,11 @@
+@font-face {
+  font-family: "Vazirmatn";
+  src: url("fonts/Vazirmatn-Variable.woff2") format("woff2");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+
 :root {
   --ink: #1E2438;
   --text: #1E2438;
@@ -352,3 +360,13 @@ input:focus, select:focus { outline: 2px solid var(--gold); outline-offset: 1px;
 .rec-dot { width: 12px; height: 12px; border-radius: 50%; background: var(--clay); animation: rec-pulse 1s ease-in-out infinite; }
 .rec-timer { flex: 1; font-weight: 800; font-variant-numeric: tabular-nums; color: var(--ink); }
 @keyframes rec-pulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: .35; transform: scale(.8); } }
+
+/* ---------- toast و نشان‌های وضعیت ---------- */
+.toast {
+  position: fixed; left: 50%; transform: translateX(-50%); bottom: calc(86px + env(safe-area-inset-bottom, 0px));
+  z-index: 80; max-width: min(92vw, 440px); padding: 10px 16px; border-radius: 14px; font-size: 13px; font-weight: 700;
+  background: var(--ink); color: #fff; box-shadow: var(--shadow); text-align: center; line-height: 1.7;
+}
+.sync-badge.has-failed { cursor: pointer; }
+.league-refresh-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+.league-updated { font-size: 12px; color: var(--text-dim); }

@@ -8,14 +8,12 @@
 <link rel="manifest" href="manifest.json" />
 <link rel="icon" href="icons/icon-192.png" />
 <link rel="apple-touch-icon" href="icons/icon-192.png" />
-<link rel="preconnect" href="https://fonts.googleapis.com" />
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-<link href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@400;500;700;800&display=swap" rel="stylesheet" />
 <link rel="stylesheet" href="style.css" />
 </head>
 <body>
 <div id="app">
   <div id="sync-badge" class="sync-badge hidden"></div>
+  <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
 
 
   <!-- ===================== ورود / ثبت‌نام ===================== -->
@@ -278,6 +276,10 @@
     <!-- تب: لیگ -->
     <div class="tab-panel hidden" data-panel="league" style="padding:0 18px 90px;">
       <h1 id="league-name" style="font-size:20px; margin-bottom:16px;"></h1>
+      <div class="league-refresh-row">
+        <span id="league-updated-at" class="league-updated"></span>
+        <button id="league-refresh-btn" class="link-btn" type="button">↻ تازه‌سازی</button>
+      </div>
       <div class="invite-box">
         <span>کد دعوت: <span class="invite-code" id="league-code"></span></span>
         <button id="copy-code-btn" class="link-btn" type="button">کپی کد دعوت</button>

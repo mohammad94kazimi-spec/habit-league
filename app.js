@@ -3,7 +3,42 @@
 // ============================================================
 
 const cfg = window.APP_CONFIG;
-const sb = supabase.createClient(cfg.SUPABASE_URL, cfg.SUPABASE_ANON_KEY);
+
+// ---------- شبکه: timeout + تشخیص «به سرور وصل نیستم» ----------
+// مرورگر وقتی وای‌فای وصله خودش رو «آنلاین» می‌دونه، حتی اگه اینترنت فیلتر باشه.
+// پس خودمون از روی نتیجه‌ی درخواست‌ها می‌فهمیم سرور در دسترسه یا نه.
+const net = { reachable: true };
+function setReachable(v) {
+  if (net.reachable === v) return;
+  net.reachable = v;
+  updateSyncBadge();
+  if (v) onReconnected();
+}
+async function timeoutFetch(input, init) {
+  const url = typeof input === "string" ? input : (input && input.url) || "";
+  const ms = url.includes("/storage/v1/") ? 120000 : url.includes("/auth/v1/") ? 20000 : 12000;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), ms);
+  const outer = init && init.signal;
+  if (outer) {
+    if (outer.aborted) ctrl.abort();
+    else outer.addEventListener("abort", () => ctrl.abort(), { once: true });
+  }
+  try {
+    const res = await fetch(input, { ...(init || {}), signal: ctrl.signal });
+    // Service Worker وقتی شبکه جواب نده نسخه‌ی ذخیره‌شده رو با این هدر برمی‌گردونه
+    if (res.headers.get("x-sw-cache") === "1") setReachable(false);
+    else if (res.status >= 502 && res.status <= 504) setReachable(false);
+    else setReachable(true);
+    return res;
+  } catch (err) {
+    setReachable(false);
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+const sb = supabase.createClient(cfg.SUPABASE_URL, cfg.SUPABASE_ANON_KEY, { global: { fetch: timeoutFetch } });
 
 const el = (id) => document.getElementById(id);
 const faDigits = ["۰", "۱", "۲", "۳", "۴", "۵", "۶", "۷", "۸", "۹"];
@@ -125,6 +160,12 @@ function todayISO() {
   const local = new Date(d.getTime() - off * 60000);
   return local.toISOString().slice(0, 10);
 }
+// تاریخ «محلی» یک زمان‌مهر (مثل completed_at). تاریخ UTC برای ایران (UTC+۳:۳۰) درست نیست:
+// کاری که ساعت ۰۱:۳۰ انجام بشه با UTC به روز قبل می‌رفت.
+function localISODate(ts) {
+  const d = new Date(ts);
+  return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+}
 function isoDaysAgo(n) {
   const d = new Date();
   d.setDate(d.getDate() - n);
@@ -204,11 +245,14 @@ const state = {
   profile: null,
   league: null,
   habits: [],
-  entriesByHabit: {}, // habit_id -> {today: row|null, yesterday: row|null}
+  entriesByHabit: {}, // habit_id -> { "YYYY-MM-DD": row } (فقط دیروز و امروز)
   todos: [],
   categories: [],
   todoFilter: "all", // "all" | "none" | category id
   leaderboard: [],
+  leaderboardAt: 0,
+  dayISO: "",       // روزی که صفحه براش ساخته شده؛ برای تشخیص عوض‌شدن روز
+  booted: false,
   activeTab: "today",
   weekStartISO: "",
   donutRange: 30, // 7 | 30 | 90 | "all"
@@ -221,50 +265,124 @@ function showScreen(name) {
 }
 
 // ============================================================
-// آفلاین: صف تغییرات محلی + همگام‌سازی خودکار وقتی اینترنت برگرده
+// آفلاین: صف تغییرات محلی + همگام‌سازی + ذخیره‌ی محلی وضعیت
 // ============================================================
 const OUTBOX_KEY = "habit_league_outbox_v1";
+const FAILED_KEY = "habit_league_failed_v1";
+// صف و ناموفق‌ها برای هر کاربر جدا نگه داشته می‌شن تا با ورود کاربر دیگر روی همین گوشی قاطی نشن
+const outboxKey = () => (state.user ? `${OUTBOX_KEY}:${state.user.id}` : OUTBOX_KEY);
+const failedKey = () => (state.user ? `${FAILED_KEY}:${state.user.id}` : FAILED_KEY);
+function readList(key) {
+  try { const v = JSON.parse(localStorage.getItem(key) || "[]"); return Array.isArray(v) ? v : []; } catch { return []; }
+}
+function writeList(key, arr) {
+  try { localStorage.setItem(key, JSON.stringify(arr)); } catch {}
+}
 function loadOutbox() {
-  try { return JSON.parse(localStorage.getItem(OUTBOX_KEY) || "[]"); } catch { return []; }
+  const list = readList(outboxKey());
+  let touched = false;
+  list.forEach((it) => { if (!it.qid) { it.qid = crypto.randomUUID(); touched = true; } });
+  if (touched) writeList(outboxKey(), list);
+  return list;
 }
-function saveOutbox(arr) {
-  try { localStorage.setItem(OUTBOX_KEY, JSON.stringify(arr)); } catch {}
-}
+function saveOutbox(arr) { writeList(outboxKey(), arr); }
 function queueWrite(entry) {
   const outbox = loadOutbox();
-  outbox.push(entry);
+  outbox.push({ ...entry, qid: crypto.randomUUID() });
   saveOutbox(outbox);
   updateSyncBadge();
 }
+function removeFromOutbox(qid) { saveOutbox(loadOutbox().filter((it) => it.qid !== qid)); }
+function loadFailed() { return readList(failedKey()); }
+function recordFailure(item, error) {
+  const list = loadFailed();
+  list.push({ table: item.table || item.fnName, kind: item.kind, message: (error && error.message) || String(error), at: Date.now() });
+  writeList(failedKey(), list.slice(-30));
+}
+// صف نسخه‌های قبلی (بدون پسوند کاربر) به صف همین کاربر منتقل می‌شه
+function migrateLegacyOutbox() {
+  const legacy = readList(OUTBOX_KEY);
+  if (!legacy.length) { try { localStorage.removeItem(OUTBOX_KEY); } catch {} return; }
+  saveOutbox(loadOutbox().concat(legacy));
+  try { localStorage.removeItem(OUTBOX_KEY); } catch {}
+}
+
+function toast(msg, ms = 4500) {
+  const t = el("toast");
+  if (!t) return;
+  t.textContent = msg;
+  t.classList.remove("hidden");
+  clearTimeout(toast._timer);
+  toast._timer = setTimeout(() => t.classList.add("hidden"), ms);
+}
+
 function updateSyncBadge() {
   const badge = el("sync-badge");
   if (!badge) return;
   const n = loadOutbox().length;
-  if (!navigator.onLine) {
-    badge.textContent = n ? `📴 آفلاین — ${toFa(n)} مورد در انتظار همگام‌سازی` : "📴 حالت آفلاین";
-    badge.classList.remove("hidden");
-  } else if (n) {
-    badge.textContent = `🔄 در حال همگام‌سازی (${toFa(n)} مورد)`;
-    badge.classList.remove("hidden");
-  } else {
-    badge.classList.add("hidden");
+  const failed = loadFailed().length;
+  let text = "";
+  if (!navigator.onLine) text = n ? `📴 آفلاین — ${toFa(n)} مورد در انتظار همگام‌سازی` : "📴 حالت آفلاین";
+  else if (!net.reachable) text = n ? `📴 به سرور وصل نیستی — ${toFa(n)} مورد در انتظار` : "📴 به سرور وصل نیستی — داده‌های ذخیره‌شده نمایش داده می‌شن";
+  else if (n) text = `🔄 در حال همگام‌سازی (${toFa(n)} مورد)`;
+  if (failed) text += `${text ? " · " : ""}⚠ ${toFa(failed)} تغییر ناموفق (لمس کن)`;
+  badge.textContent = text;
+  badge.classList.toggle("hidden", !text);
+  badge.classList.toggle("has-failed", failed > 0);
+}
+el("sync-badge").addEventListener("click", () => {
+  const failed = loadFailed();
+  if (!failed.length) return;
+  alert("این تغییرات آفلاین روی سرور اعمال نشدن (مثلاً چون مورد مربوطه حذف شده بود):\n" +
+    failed.map((f) => `• ${f.table} (${f.kind}): ${f.message}`).join("\n"));
+  writeList(failedKey(), []);
+  updateSyncBadge();
+});
+
+// خطای «موقتی» یعنی مشکل از اتصال/سروره نه از خودِ درخواست؛ باید بعداً دوباره امتحان بشه
+function isTransientError(res) {
+  const err = res && res.error;
+  if (!err) return false;
+  const status = typeof res.status === "number" ? res.status : (typeof err.status === "number" ? err.status : null);
+  if (status !== null) {
+    return status === 0 || status === 408 || status === 429 || (status >= 500 && status <= 504) || (status >= 520 && status <= 527);
   }
+  const msg = `${err.name || ""} ${err.message || ""}`.toLowerCase();
+  return /failed to fetch|networkerror|network error|load failed|abort|timeout|timed out|fetch failed/.test(msg);
 }
 
-// تلاش برای ارسال مستقیم به سرور؛ اگه آفلاینی یا شبکه قطع شد، در صف محلی ذخیره می‌کنه
-// تا وقتی اینترنت برگرده. اگه خطا واقعاً از سمت سرور باشه (نه قطعی شبکه)، صف نمی‌شه.
+// نوشتن‌های در حال ارسال؛ برای اینکه تازه‌سازی همزمان اون‌ها رو از صفحه پاک نکنه
+const inflightOps = [];
+
+// تلاش برای ارسال مستقیم به سرور؛ اگه آفلاین/سرور در دسترس نبود یا قبلاً چیزی در صف مونده
+// (برای حفظ ترتیب)، در صف محلی ذخیره می‌شه. فقط خطاهای واقعی سرور به کاربر نشون داده می‌شن.
 async function attemptOrQueue(networkCall, queueEntry) {
-  if (!navigator.onLine) {
-    queueWrite(queueEntry);
-    return { queued: true };
-  }
+  inflightOps.push(queueEntry);
   try {
-    const { error } = await networkCall();
-    if (error) return { ok: false, error };
+    if (!navigator.onLine || !net.reachable || loadOutbox().length > 0) {
+      queueWrite(queueEntry);
+      syncOutbox();
+      return { queued: true };
+    }
+    let res;
+    try {
+      res = await networkCall();
+    } catch (err) {
+      queueWrite(queueEntry);
+      return { queued: true };
+    }
+    if (res && res.error) {
+      if (isTransientError(res)) {
+        queueWrite(queueEntry);
+        return { queued: true };
+      }
+      return { ok: false, error: res.error };
+    }
     return { ok: true };
-  } catch (err) {
-    queueWrite(queueEntry);
-    return { queued: true };
+  } finally {
+    const i = inflightOps.indexOf(queueEntry);
+    if (i !== -1) inflightOps.splice(i, 1);
+    schedulePersist();
   }
 }
 
@@ -275,41 +393,189 @@ function applyMatches(query, item) {
   return query;
 }
 
+// اجرای یک آیتم صف. درج‌ها «upsert بدون تغییر در صورت تکراری» هستن تا اگه بار اول به سرور
+// رسیده بود ولی جوابش گم شد، تکرارشون خطای شناسه‌ی تکراری نده و صف رو گیر نندازه.
+async function runQueued(item) {
+  if (item.kind === "insert") {
+    const opts = { onConflict: "id", ignoreDuplicates: true };
+    let res = await sb.from(item.table).upsert(item.payload, opts);
+    if (res.error && res.error.code === "23503" && item.table === "todos") {
+      // دسته‌بندی‌ای که کار بهش اشاره می‌کرد دیگه نیست؛ کار رو «بدون دسته» ذخیره کن
+      const strip = (r) => ({ ...r, category_id: null });
+      res = await sb.from("todos").upsert(Array.isArray(item.payload) ? item.payload.map(strip) : strip(item.payload), opts);
+    }
+    return res;
+  }
+  if (item.kind === "update") return applyMatches(sb.from(item.table).update(item.payload), item);
+  if (item.kind === "delete") return applyMatches(sb.from(item.table).delete(), item);
+  if (item.kind === "rpc") return sb.rpc(item.fnName, item.fnArgs);
+  return { error: { message: "عملیات ناشناخته" }, status: 400 };
+}
+
 let syncingOutbox = false;
 async function syncOutbox() {
   updateSyncBadge();
   if (syncingOutbox || !navigator.onLine || !state.user) return;
   syncingOutbox = true;
-  let outbox = loadOutbox();
   let changed = false;
-  while (outbox.length) {
-    const item = outbox[0];
-    try {
-      let error;
-      if (item.kind === "insert") ({ error } = await sb.from(item.table).insert(item.payload));
-      else if (item.kind === "update") ({ error } = await applyMatches(sb.from(item.table).update(item.payload), item));
-      else if (item.kind === "delete") ({ error } = await applyMatches(sb.from(item.table).delete(), item));
-      else if (item.kind === "rpc") ({ error } = await sb.rpc(item.fnName, item.fnArgs));
-      if (error) throw error;
-      outbox.shift();
+  let newFailures = 0;
+  try {
+    for (;;) {
+      // هر دور صف از نو خونده می‌شه تا چیزی که وسط همگام‌سازی اضافه شده گم نشه
+      const outbox = loadOutbox();
+      if (!outbox.length) break;
+      const item = outbox[0];
+      let res;
+      try { res = await runQueued(item); } catch (err) { res = { error: { message: String(err) }, status: 0 }; }
+      if (res && res.error) {
+        if (isTransientError(res)) break;      // اتصال نیست؛ ترتیب حفظ می‌شه و بعداً ادامه می‌دیم
+        recordFailure(item, res.error);        // خطای دائمی: کنار گذاشته می‌شه تا بقیه‌ی صف گیر نکنه
+        newFailures++;
+      }
+      removeFromOutbox(item.qid);
       changed = true;
-    } catch (err) {
-      console.error("sync: item failed, retrying later", err);
-      break;
     }
+  } finally {
+    syncingOutbox = false;
   }
-  saveOutbox(outbox);
-  syncingOutbox = false;
   updateSyncBadge();
+  if (newFailures) toast(`⚠ ${toFa(newFailures)} تغییر آفلاین روی سرور اعمال نشد. نشان بالای صفحه رو لمس کن.`, 7000);
   if (changed) {
-    await Promise.all([loadHabits(), loadCategories(), loadTodos(), loadLeaderboard()]);
+    await refreshAllFromServer();
     renderTabs();
   }
 }
-window.addEventListener("online", syncOutbox);
+
+// ---------- اعمال دوباره‌ی عملیات صف‌شده روی وضعیت محلی ----------
+// وضعیت محلی همیشه = آخرین داده‌ی سرور + تغییراتِ هنوز-ارسال‌نشده. همه‌ی عملیات idempotent هستن.
+function rowMatches(row, item) {
+  if (item.matches) return item.matches.every(([c, v]) => row[c] === v);
+  return row[item.matchColumn] === item.matchValue;
+}
+function listForTable(table) {
+  return table === "todos" ? state.todos : table === "habits" ? state.habits : table === "categories" ? state.categories : null;
+}
+function applyOpToState(item) {
+  if (item.kind === "rpc") {
+    if (item.fnName === "record_entry") {
+      const { p_habit_id, p_date, p_success } = item.fnArgs;
+      const habit = state.habits.find((h) => h.id === p_habit_id);
+      if (habit) setEntry(habit.id, p_date, computeEntry(habit, p_date, p_success));
+    }
+    return;
+  }
+  const list = listForTable(item.table);
+  if (!list) return;
+  if (item.kind === "insert") {
+    (Array.isArray(item.payload) ? item.payload : [item.payload]).forEach((r) => {
+      if (!list.some((x) => x.id === r.id)) list.push({ ...r });
+    });
+  } else if (item.kind === "update") {
+    list.forEach((r) => { if (rowMatches(r, item)) Object.assign(r, item.payload); });
+    if (item.table === "habits" && item.payload.archived === true) {
+      const keep = list.filter((r) => !r.archived);
+      list.length = 0;
+      keep.forEach((r) => list.push(r));
+    }
+  } else if (item.kind === "delete") {
+    const keep = list.filter((r) => !rowMatches(r, item));
+    list.length = 0;
+    keep.forEach((r) => list.push(r));
+    if (item.table === "categories") state.todos.forEach((t) => { if (t.category_id === item.matchValue) t.category_id = null; });
+  }
+}
+function applyOutboxToState(ops) { (ops || []).forEach(applyOpToState); }
+
+// ---------- ذخیره‌ی محلی وضعیت (IndexedDB) ----------
+const IDB_NAME = "habit_league_db";
+const IDB_STORE = "kv";
+function idbOpen() {
+  return new Promise((resolve, reject) => {
+    if (typeof indexedDB === "undefined") { reject(new Error("IndexedDB در دسترس نیست")); return; }
+    const req = indexedDB.open(IDB_NAME, 1);
+    req.onupgradeneeded = () => req.result.createObjectStore(IDB_STORE);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+async function idbGet(key) {
+  const db = await idbOpen();
+  return new Promise((resolve, reject) => {
+    const r = db.transaction(IDB_STORE).objectStore(IDB_STORE).get(key);
+    r.onsuccess = () => resolve(r.result);
+    r.onerror = () => reject(r.error);
+  });
+}
+async function idbSet(key, value) {
+  const db = await idbOpen();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(IDB_STORE, "readwrite");
+    tx.objectStore(IDB_STORE).put(value, key);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+const snapshotKey = (uid) => `snapshot:${uid}`;
+let persistTimer = null;
+function schedulePersist() {
+  clearTimeout(persistTimer);
+  persistTimer = setTimeout(saveSnapshotNow, 400);
+}
+async function saveSnapshotNow() {
+  if (!state.user || !state.league || !state.booted) return;
+  try {
+    await idbSet(snapshotKey(state.user.id), {
+      v: 1, savedAt: Date.now(),
+      league: state.league, habits: state.habits, categories: state.categories, todos: state.todos,
+      entriesByHabit: state.entriesByHabit, leaderboard: state.leaderboard, leaderboardAt: state.leaderboardAt,
+    });
+  } catch (err) { /* ذخیره‌ی محلی بهترین‌تلاشه */ }
+}
+async function loadSnapshot(uid) {
+  try { const snap = await idbGet(snapshotKey(uid)); return snap && snap.v === 1 ? snap : null; } catch { return null; }
+}
+function hydrateFromSnapshot(snap) {
+  state.league = snap.league;
+  state.habits = snap.habits || [];
+  state.categories = snap.categories || [];
+  state.todos = snap.todos || [];
+  state.entriesByHabit = snap.entriesByHabit || {};
+  state.leaderboard = snap.leaderboard || [];
+  state.leaderboardAt = snap.leaderboardAt || 0;
+}
+
+// ---------- اتصال دوباره / تیک دوره‌ای ----------
+function onReconnected() {
+  if (!state.user || !state.league) return;
+  syncOutbox().then(() => refreshAllFromServer()).then(() => renderTabs());
+}
+async function probeServer() {
+  try { await sb.from("categories").select("id").limit(1); } catch (err) { /* وضعیت از روی timeoutFetch ثبت می‌شه */ }
+}
+function checkDayRollover() {
+  const t = todayISO();
+  if (!state.user || !state.dayISO || state.dayISO === t) return;
+  state.dayISO = t;
+  renderTabs();
+  refreshAllFromServer().then(() => renderTabs());
+}
+let lastLeaderboardTry = 0;
+async function periodicTick() {
+  checkDayRollover();
+  if (!state.user) return;
+  if (navigator.onLine && !net.reachable) await probeServer();
+  await syncOutbox();
+  if (state.activeTab === "league" && !document.hidden && Date.now() - lastLeaderboardTry > 45000) refreshLeaderboard();
+}
+window.addEventListener("online", periodicTick);
 window.addEventListener("offline", updateSyncBadge);
-document.addEventListener("visibilitychange", () => { if (!document.hidden) syncOutbox(); });
-setInterval(syncOutbox, 25000);
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) return;
+  checkDayRollover();
+  syncOutbox();
+  if (state.activeTab === "league") refreshLeaderboard();
+});
+setInterval(periodicTick, 25000);
 
 // انجام‌شده/نشده‌ی یک کار را (خوش‌بینانه + با پشتیبانی آفلاین) تغییر می‌دهد
 async function writeTodoDone(todo, doneVal) {
@@ -433,6 +699,7 @@ document.querySelectorAll(".bottom-nav button").forEach((btn) => {
   btn.addEventListener("click", () => {
     state.activeTab = btn.dataset.tab;
     renderTabs();
+    if (state.activeTab === "league") refreshLeaderboard(); // جدول امتیاز همیشه موقع باز کردن تب تازه می‌شه
   });
 });
 
@@ -453,6 +720,7 @@ function renderTabs() {
 // ============================================================
 // بارگذاری داده‌ها
 // ============================================================
+// هر loader در صورت خطا state فعلی (مثلاً نسخه‌ی ذخیره‌شده) رو دست‌نخورده می‌ذاره و false برمی‌گردونه.
 async function loadHabits() {
   const { data, error } = await sb
     .from("habits")
@@ -460,23 +728,24 @@ async function loadHabits() {
     .eq("user_id", state.user.id)
     .eq("archived", false)
     .order("created_at", { ascending: true });
-  if (error) { console.error(error); return; }
-  state.habits = data || [];
-
-  const ids = state.habits.map((h) => h.id);
-  state.entriesByHabit = {};
+  if (error) { console.error(error); return false; }
+  const habits = data || [];
+  const entries = {};
+  const ids = habits.map((h) => h.id);
   if (ids.length) {
-    const { data: entries } = await sb
+    const r = await sb
       .from("daily_entries")
       .select("*")
       .in("habit_id", ids)
-      .gte("entry_date", isoDaysAgo(1));
-    (entries || []).forEach((row) => {
-      state.entriesByHabit[row.habit_id] = state.entriesByHabit[row.habit_id] || {};
-      if (row.entry_date === todayISO()) state.entriesByHabit[row.habit_id].today = row;
-      if (row.entry_date === isoDaysAgo(1)) state.entriesByHabit[row.habit_id].yesterday = row;
+      .gte("entry_date", addDaysISO(todayISO(), -1));
+    if (r.error) { console.error(r.error); return false; }
+    (r.data || []).forEach((row) => {
+      (entries[row.habit_id] = entries[row.habit_id] || {})[row.entry_date] = row;
     });
   }
+  state.habits = habits;
+  state.entriesByHabit = entries;
+  return true;
 }
 
 async function loadCategories() {
@@ -485,20 +754,22 @@ async function loadCategories() {
     .select("*")
     .eq("user_id", state.user.id)
     .order("created_at", { ascending: true });
-  if (error) { console.error(error); return; }
+  if (error) { console.error(error); return false; }
   if (!data.length) {
     await sb.from("categories").insert(
       DEFAULT_CATEGORIES.map((c) => ({ user_id: state.user.id, label: c.label, color: c.color }))
     );
-    const { data: seeded } = await sb
+    const seeded = await sb
       .from("categories")
       .select("*")
       .eq("user_id", state.user.id)
       .order("created_at", { ascending: true });
-    state.categories = seeded || [];
-    return;
+    if (seeded.error) { console.error(seeded.error); return false; }
+    state.categories = seeded.data || [];
+    return true;
   }
   state.categories = data;
+  return true;
 }
 
 async function loadTodos() {
@@ -508,41 +779,96 @@ async function loadTodos() {
     .eq("user_id", state.user.id)
     .order("done", { ascending: true })
     .order("created_at", { ascending: false });
-  if (error) { console.error(error); return; }
+  if (error) { console.error(error); return false; }
   state.todos = data || [];
+  return true;
 }
 
+// "ok" | "none" (عضو هیچ لیگی نیست) | "error" (به سرور نرسیدیم؛ state دست‌نخورده می‌مونه)
 async function loadLeague() {
-  const { data: members } = await sb
-    .from("league_members")
-    .select("league_id")
-    .eq("user_id", state.user.id)
-    .limit(1);
-  if (!members || !members.length) { state.league = null; return; }
-  const leagueId = members[0].league_id;
-  const { data: league } = await sb.from("leagues").select("*").eq("id", leagueId).single();
-  state.league = league;
+  const m = await sb.from("league_members").select("league_id").eq("user_id", state.user.id).limit(1);
+  if (m.error) { console.error(m.error); return "error"; }
+  if (!m.data || !m.data.length) { state.league = null; return "none"; }
+  const l = await sb.from("leagues").select("*").eq("id", m.data[0].league_id).single();
+  if (l.error) { console.error(l.error); return "error"; }
+  state.league = l.data;
+  return "ok";
 }
 
 async function loadLeaderboard() {
-  if (!state.league) return;
+  if (!state.league) return true;
   const { data, error } = await sb
     .from("league_leaderboard")
     .select("*")
     .eq("league_id", state.league.id)
     .order("total_points", { ascending: false });
-  if (error) { console.error(error); return; }
+  if (error) { console.error(error); return false; }
   state.leaderboard = data || [];
+  if (net.reachable) state.leaderboardAt = Date.now(); // اگه از کشِ آفلاین اومده باشه «تازه» حساب نمی‌شه
+  return true;
+}
+
+// همه‌ی داده‌ها رو از سرور می‌گیره و بعد تغییراتِ هنوز-ارسال‌نشده (صف + در حال ارسال) رو روش اعمال می‌کنه
+let refreshing = null;
+function refreshAllFromServer() {
+  if (refreshing) return refreshing;
+  refreshing = (async () => {
+    try {
+      if (!state.user || !state.league) return false;
+      const results = await Promise.all([loadHabits(), loadCategories(), loadTodos(), loadLeaderboard()]);
+      applyOutboxToState(loadOutbox().concat(inflightOps));
+      schedulePersist();
+      return results.every(Boolean);
+    } finally {
+      refreshing = null;
+    }
+  })();
+  return refreshing;
+}
+
+// فقط جدول امتیازها (تب لیگ)
+async function refreshLeaderboard() {
+  if (!state.league || !state.user) return false;
+  lastLeaderboardTry = Date.now();
+  const ok = await loadLeaderboard();
+  if (ok) schedulePersist();
+  if (state.activeTab === "league") renderLeague();
+  return ok;
 }
 
 // ============================================================
 // رندر: امروز
 // ============================================================
+// ثبت‌های عادت‌ها با «تاریخ» کلید می‌خورن (نه «امروز/دیروز»)، پس با عوض‌شدن روز خودبه‌خود درست می‌مونن
+function entryOn(habitId, iso) {
+  const m = state.entriesByHabit[habitId];
+  return m ? m[iso] || null : null;
+}
+function setEntry(habitId, iso, row) {
+  (state.entriesByHabit[habitId] = state.entriesByHabit[habitId] || {})[iso] = row;
+}
+function clearEntry(habitId, iso) {
+  if (state.entriesByHabit[habitId]) delete state.entriesByHabit[habitId][iso];
+}
+// همون محاسبه‌ی تابع record_entry در دیتابیس (برای نمایش فوریِ خوش‌بینانه)
+function computeEntry(habit, iso, success) {
+  const prev = entryOn(habit.id, addDaysISO(iso, -1));
+  const prevStreak = prev && prev.success ? prev.streak : 0;
+  let streak, points;
+  if (success) {
+    streak = prevStreak + 1;
+    points = habit.base_points + (streak % habit.streak_bonus_every === 0 ? habit.streak_bonus_points : 0);
+  } else {
+    streak = 0;
+    points = -habit.penalty_points;
+  }
+  return { habit_id: habit.id, entry_date: iso, success, streak, points };
+}
 function streakFor(habit) {
-  const e = state.entriesByHabit[habit.id] || {};
-  if (e.today) return e.today.streak;
-  if (e.yesterday && e.yesterday.success) return e.yesterday.streak;
-  return 0;
+  const t = entryOn(habit.id, todayISO());
+  if (t) return t.streak;
+  const y = entryOn(habit.id, addDaysISO(todayISO(), -1));
+  return y && y.success ? y.streak : 0;
 }
 
 // ---------- تقویم ماهانه‌ی کارها (در صفحه‌ی امروز) ----------
@@ -676,7 +1002,7 @@ function renderToday() {
     wrap.innerHTML = `<div class="empty-state"><div class="big">🌱</div>هنوز عادتی اضافه نکردی.<br>از تب «عادت‌ها» یکی بساز.</div>`;
   } else {
     state.habits.forEach((h) => {
-      const todayEntry = (state.entriesByHabit[h.id] || {}).today;
+      const todayEntry = entryOn(h.id, todayISO());
       const row = document.createElement("div");
       row.className = "habit-row";
       row.innerHTML = `
@@ -747,26 +1073,15 @@ el("today-list").addEventListener("click", async (e) => {
   const date = todayISO();
   const habit = state.habits.find((h) => h.id === habitId);
   if (!habit) return;
-  const existing = state.entriesByHabit[habitId] || {};
-  const prevToday = existing.today;
-  const prevStreak = existing.yesterday && existing.yesterday.success ? existing.yesterday.streak : 0;
-  let newStreak, points;
-  if (success) {
-    newStreak = prevStreak + 1;
-    points = habit.base_points + (newStreak % habit.streak_bonus_every === 0 ? habit.streak_bonus_points : 0);
-  } else {
-    newStreak = 0;
-    points = -habit.penalty_points;
-  }
-  state.entriesByHabit[habitId] = existing;
-  state.entriesByHabit[habitId].today = { habit_id: habitId, entry_date: date, success, streak: newStreak, points };
+  const prevEntry = entryOn(habitId, date);
+  setEntry(habitId, date, computeEntry(habit, date, success));
   renderToday();
   const result = await attemptOrQueue(
     () => sb.rpc("record_entry", { p_habit_id: habitId, p_date: date, p_success: success }),
     { kind: "rpc", fnName: "record_entry", fnArgs: { p_habit_id: habitId, p_date: date, p_success: success } }
   );
   if (!result.ok && !result.queued) {
-    state.entriesByHabit[habitId].today = prevToday;
+    if (prevEntry) setEntry(habitId, date, prevEntry); else clearEntry(habitId, date);
     alert(result.error.message);
     renderToday();
   }
@@ -963,7 +1278,7 @@ function renderCompletedTodos() {
         <div class="todo-title">${escapeHtml(t.title)}</div>
         <div class="todo-meta">
           <span class="cat-pill" style="background:${cat.color}22; color:${cat.color};">${cat.label}</span>
-          ${t.completed_at ? `<span class="completed-date">انجام شد: ${isoToJalaliLabel(t.completed_at.slice(0, 10))}</span>` : ""}
+          ${t.completed_at ? `<span class="completed-date">انجام شد: ${isoToJalaliLabel(localISODate(t.completed_at))}</span>` : ""}
           ${audioBadge(t)}
         </div>
       </div>`;
@@ -1837,6 +2152,11 @@ function renderLeague() {
   if (!state.league) return;
   el("league-name").textContent = state.league.name;
   el("league-code").textContent = state.league.invite_code;
+  const at = state.leaderboardAt;
+  const hhmm = at ? new Date(at).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" }) : "";
+  el("league-updated-at").textContent = at
+    ? `آخرین به‌روزرسانی: ${toFa(hhmm)}${net.reachable ? "" : " — آفلاین، داده‌ی ذخیره‌شده"}`
+    : (net.reachable ? "" : "آفلاین — هنوز داده‌ای ذخیره نشده");
   const wrap = el("leaderboard-list");
   wrap.innerHTML = "";
   state.leaderboard.forEach((row, i) => {
@@ -1850,6 +2170,13 @@ function renderLeague() {
     wrap.appendChild(line);
   });
 }
+
+el("league-refresh-btn").addEventListener("click", async () => {
+  const btn = el("league-refresh-btn");
+  btn.disabled = true;
+  await refreshLeaderboard();
+  btn.disabled = false;
+});
 
 el("copy-code-btn").addEventListener("click", () => {
   navigator.clipboard.writeText(state.league.invite_code);
@@ -1900,7 +2227,7 @@ function mostProductiveDay() {
   const counts = [0, 0, 0, 0, 0, 0, 0];
   state.todos.forEach((t) => {
     if (!t.done || !t.completed_at) return;
-    const iso = t.completed_at.slice(0, 10);
+    const iso = localISODate(t.completed_at);
     const [jy, jm, jd] = isoToJalali(iso);
     counts[jalaliWeekday(jy, jm, jd)] += 1;
   });
@@ -1936,7 +2263,7 @@ function renderWeekChart() {
   el("week-label").textContent = `${isoToJalaliLabel(start)} تا ${isoToJalaliLabel(end)}`;
   const days = [0, 1, 2, 3, 4, 5, 6].map((i) => addDaysISO(start, i));
   const completedCounts = days.map((iso) =>
-    state.todos.filter((t) => t.done && t.completed_at && t.completed_at.slice(0, 10) === iso).length
+    state.todos.filter((t) => t.done && t.completed_at && localISODate(t.completed_at) === iso).length
   );
   const dueCounts = days.map((iso) => state.todos.filter((t) => t.due_date === iso).length);
   const max = Math.max(...completedCounts, 1);
@@ -1994,7 +2321,7 @@ function renderDonut() {
   const cutoff = state.donutRange === "all" ? null : addDaysISO(todayISO(), -(state.donutRange - 1));
   const done = state.todos.filter((t) => {
     if (!t.done || !t.completed_at) return false;
-    const iso = t.completed_at.slice(0, 10);
+    const iso = localISODate(t.completed_at);
     return cutoff ? iso >= cutoff : true;
   });
   const byCat = {};
@@ -2039,7 +2366,7 @@ function renderDonut() {
 function renderHeatmapYearOptions() {
   const sel = el("heatmap-year-select");
   const yearsWithData = new Set(
-    state.todos.filter((t) => t.done && t.completed_at).map((t) => isoToJalali(t.completed_at.slice(0, 10))[0])
+    state.todos.filter((t) => t.done && t.completed_at).map((t) => isoToJalali(localISODate(t.completed_at))[0])
   );
   yearsWithData.add(isoToJalali(todayISO())[0]);
   const years = [...yearsWithData].sort((a, b) => b - a);
@@ -2055,7 +2382,7 @@ function renderHeatmap() {
   const counts = {};
   state.todos.forEach((t) => {
     if (!t.done || !t.completed_at) return;
-    const iso = t.completed_at.slice(0, 10);
+    const iso = localISODate(t.completed_at);
     counts[iso] = (counts[iso] || 0) + 1;
   });
 
@@ -2124,43 +2451,97 @@ function escapeHtml(s) {
   return d.innerHTML;
 }
 
-async function bootstrapAfterAuth() {
-  // getSession می‌خونه از localStorage و برخلاف getUser نیازی به شبکه نداره —
-  // یعنی وقتی آفلاینی هم می‌تونی با نشست قبلی وارد اپ بشی.
-  const { data: { session } } = await sb.auth.getSession();
-  const user = session ? session.user : null;
-  state.user = user;
-  if (!user) { showScreen("auth"); return; }
+// ---------- کاربر فعلی (حتی وقتی آفلاینی و توکن منقضی شده) ----------
+// getSession وقتی توکن منقضی شده و اینترنت نیست، نشست رو null برمی‌گردونه (تست شد) ولی نشست
+// هنوز در localStorage هست و به‌محض اتصال خودکار تمدید می‌شه. پس از همون‌جا کاربر رو می‌خونیم.
+function readStoredUser() {
+  try {
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k && k.startsWith("sb-") && k.endsWith("-auth-token")) {
+        const v = JSON.parse(localStorage.getItem(k));
+        if (v && v.user && v.user.id) return v.user;
+      }
+    }
+  } catch (err) { /* ignore */ }
+  return null;
+}
+async function resolveUser() {
+  let session = null, error = null;
+  try {
+    const r = await sb.auth.getSession();
+    session = r.data && r.data.session;
+    error = r.error;
+  } catch (err) { error = err; }
+  if (session) return session.user;
+  const networkIssue = !navigator.onLine || (error && isTransientError({ error, status: error.status }));
+  return networkIssue ? readStoredUser() : null;
+}
 
-  try {
-    await loadLeague();
-  } catch (err) {
-    console.error("loadLeague failed (احتمالاً آفلاین):", err);
-  }
-  if (!state.league) {
-    if (navigator.onLine) { showScreen("onboard"); return; }
-    // آفلاین و بدون لیگ ذخیره‌شده در کش: نمی‌تونیم onboarding آفلاین انجام بدیم
-    showScreen("onboard");
-    el("onboard-error").textContent = "برای ساخت یا پیوستن به لیگ، اول یک‌بار باید آنلاین باشی.";
-    return;
-  }
-  try {
-    await Promise.all([loadHabits(), loadCategories(), loadTodos(), loadLeaderboard()]);
-  } catch (err) {
-    console.error("بارگذاری داده‌ها ناموفق بود (احتمالاً آفلاین):", err);
-  }
+let bootstrapPromise = null;
+function bootstrapAfterAuth() {
+  if (!bootstrapPromise) bootstrapPromise = doBootstrap().finally(() => { bootstrapPromise = null; });
+  return bootstrapPromise;
+}
+
+async function doBootstrap() {
+  const user = await resolveUser();
+  state.user = user;
+  if (!user) { state.booted = false; showScreen("auth"); return; }
+  migrateLegacyOutbox();
+
+  state.dayISO = todayISO();
   initTodoCalToCurrentMonth();
   state.weekStartISO = startOfWeekISO(todayISO());
   state.heatmapYear = isoToJalali(todayISO())[0];
-  showScreen("main");
+
+  // اول نسخه‌ی ذخیره‌شده + تغییرات صف‌شده رو فوری نشون می‌دیم (حتی آفلاین)، بعد از سرور تازه می‌کنیم
+  let shown = false;
+  const snap = await loadSnapshot(user.id);
+  if (snap && snap.league) {
+    hydrateFromSnapshot(snap);
+    applyOutboxToState(loadOutbox());
+    state.booted = true;
+    showScreen("main");
+    renderTabs();
+    updateSyncBadge();
+    shown = true;
+  }
+
+  const lg = await loadLeague();
+  if (lg === "none") { state.booted = false; showScreen("onboard"); return; }
+  if (lg === "error") {
+    if (!shown) {
+      showScreen("onboard");
+      el("onboard-error").textContent = "برای اولین ورود باید به سرور وصل بشی. اتصال برقرار نشد؛ چند لحظه‌ی دیگه خودکار دوباره تلاش می‌کنم.";
+      setTimeout(bootstrapAfterAuth, 10000);
+    }
+    return;
+  }
+  el("onboard-error").textContent = "";
+  state.booted = true;
+  await refreshAllFromServer();
+  if (!shown) showScreen("main");
   renderTabs();
   updateSyncBadge();
   syncOutbox();
 }
 
-sb.auth.onAuthStateChange((event) => {
-  if (event === "SIGNED_IN" || event === "INITIAL_SESSION") bootstrapAfterAuth();
-  if (event === "SIGNED_OUT") { state.user = null; renderAuth(); showScreen("auth"); }
+function resetState() {
+  clearTimeout(persistTimer);
+  Object.assign(state, {
+    user: null, league: null, habits: [], categories: [], todos: [], entriesByHabit: {},
+    leaderboard: [], leaderboardAt: 0, booted: false, dayISO: "",
+  });
+}
+
+sb.auth.onAuthStateChange((event, session) => {
+  if (event === "SIGNED_OUT") { resetState(); renderAuth(); showScreen("auth"); return; }
+  if (event === "SIGNED_IN" || event === "INITIAL_SESSION") {
+    // برگشتن به اپ هم گاهی SIGNED_IN می‌ده؛ اگه همون کاربر قبلاً وارد شده، دوباره از اول بالا نمیاریم
+    if (state.booted && session && session.user && state.user && session.user.id === state.user.id) return;
+    bootstrapAfterAuth();
+  }
 });
 
 renderAuth();
